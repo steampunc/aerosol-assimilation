@@ -40,7 +40,7 @@ def getVIIRSMetadata(folder):
     
     for tar_f in tar_files:
             
-        if (tar_f == "metadata" or tar_f == "merra.nc" or tar_f == "processed"):
+        if (tar_f == "metadata" or tar_f == "merra.nc" or tar_f == "full_processed/"):
             continue
         log("Extracting " + tar_f)
         tar = tarfile.open(folder + tar_f)
@@ -81,12 +81,12 @@ def getClosestVIIRSSwath(point, metadata):
 def getVIIRSData(folder, filename, destination):
     levels = filename.split("/")
     
-    log("Extracting {} to {}".format(levels[0], destination))
+    # log("Extracting {} to {}".format(levels[0], destination))
     tar = tarfile.open(folder + levels[0])
     tar.extractall(path=destination)
     tar.close()
     
-    log("Reading " + levels[1])
+    # log("Reading " + levels[1])
     data = xr.open_dataset(destination + levels[1])
     
     for f in os.listdir(destination):
@@ -111,6 +111,7 @@ def getMERRAROI(lon, lat):
     d_lon = 0.625
     d_lat = 0.5
     polygon = []
+    extended_polygon = []
     bounds = {"minLon": lon - d_lon, "maxLon": lon + d_lon,
               "minLat": lat - d_lat, "maxLat": lat + d_lat}
     polygon.append(np.array([bounds["minLon"], bounds["minLat"]]))
@@ -118,7 +119,12 @@ def getMERRAROI(lon, lat):
     polygon.append(np.array([bounds["maxLon"], bounds["maxLat"]]))
     polygon.append(np.array([bounds["maxLon"], bounds["minLat"]]))
     polygon.append(np.array([bounds["minLon"], bounds["minLat"]]))
-    return [np.array(polygon), bounds]
+    extended_polygon.append(np.array([bounds["minLon"] - 1.5 * d_lon, bounds["minLat"] - 1.5 * d_lat]))
+    extended_polygon.append(np.array([bounds["minLon"] - 1.5 * d_lon, bounds["maxLat"] + 1.5 * d_lat]))
+    extended_polygon.append(np.array([bounds["maxLon"] + 1.5 * d_lon, bounds["maxLat"] + 1.5 * d_lat]))
+    extended_polygon.append(np.array([bounds["maxLon"] + 1.5 * d_lon, bounds["minLat"] - 1.5 * d_lat]))
+    extended_polygon.append(np.array([bounds["minLon"] - 1.5 * d_lon, bounds["minLat"] - 1.5 * d_lat]))
+    return [np.array(polygon), bounds, extended_polygon]
 
         
 def inSwath(roi, swath_polygon):
@@ -128,7 +134,7 @@ def inSwath(roi, swath_polygon):
             return False
     return True
 
-## Performs nearest neighbor linear interpolation on the VIIRS data array.
+## Performs nearest neighbor interpolation on the VIIRS data array.
 def VIIRStoGrid(s_points, data_array, boundary):
     numLonPoints = 100j
     numLatPoints = 80j
@@ -136,6 +142,8 @@ def VIIRStoGrid(s_points, data_array, boundary):
     lon_grid, lat_grid = np.mgrid[boundary["minLon"]:boundary["maxLon"]:numLonPoints, 
                                   boundary["minLat"]:boundary["maxLat"]:numLatPoints]
     
+    log(len(s_points))
+    log(len(data_array))
     gridded_data = griddata(s_points, data_array, (lon_grid, lat_grid), method="nearest")
     return gridded_data
 
@@ -171,8 +179,8 @@ def process(folder, bounds):
         log("Processing new lat level for {}".format(mp.current_process().name))
         log("Percent complete: {}".format(float(y - bounds["minLat"]) / lat_diff))
         for x in range(bounds["minLon"], bounds["maxLon"]):
-            good_files = os.listdir(folder + "processed/")
-            bad_files = os.listdir(folder + "bad_points/")
+            good_files = os.listdir(folder + "full_processed/")
+            bad_files = os.listdir(folder + "full_bad_points/")
             curr_name = "{:04d}_{:04d}".format(x, y) 
             if curr_name in good_files or curr_name in bad_files:
                 log("Already considered point ({}, {})".format(x, y))
@@ -180,14 +188,18 @@ def process(folder, bounds):
 
             # Getting lat/lon of merra gridpoint
             point = [merra_data.lon.values[x], merra_data.lat.values[y]]
+            above_point = [merra_data.lon.values[x], merra_data.lat.values[y] + 0.6]
+            below_point = [merra_data.lon.values[x], merra_data.lat.values[y] - 0.6]
             log("\nConsidering merra point at " + str(point) + "\nIndex " + str(x) + ", " + str(y))
             
             # Getting corresponding VIIRs box
             [closest_viirs, distance] = getClosestVIIRSSwath(point, metadata)
+            [above_viirs, ab_dist] = getClosestVIIRSSwath(above_point, metadata)
+            [below_viirs, bl_dist] = getClosestVIIRSSwath(below_point, metadata)
             
             # Skipping point if too far from center of swath
             log(distance)
-            if (distance > 44):
+            if (distance > 45):
                 log("Too far from center of VIIRS data.")
                 continue
                 
@@ -202,16 +214,29 @@ def process(folder, bounds):
             merra_val = merra_data.TOTEXTTAU.values[time][y][x]
             log("MERRA value: " + str(merra_val) + " taken at time " + str(time) + "hrs")
             
-            
-            if not inSwath(roi[0][:-1], metadata[closest_viirs]["bounds"][:-1]):
-                log("Not in satellite swath, so discarding")
-                continue
-            
             # Updating satellite data if the swath has changed.
             if (prev_swath != closest_viirs):
                 log("Retrieving VIIRS data from closest swath.")
                 viirs_data = getVIIRSData(folder, closest_viirs, active_dir)
                 viirs_arrays = getVIIRSArrays(viirs_data)
+                log(len(viirs_arrays[0]))
+                log(len(viirs_arrays[1]))
+            if (above_viirs != closest_viirs):
+                log("Resolving scan edge by getting next above VIIRS data")
+                above_data = getVIIRSData(folder, above_viirs, active_dir)
+                above_arrays = getVIIRSArrays(above_data)
+                viirs_arrays[0] = np.append(viirs_arrays[0], above_arrays[0], axis=0)
+                viirs_arrays[1] = np.append(viirs_arrays[1], above_arrays[1])
+                log(len(viirs_arrays[0]))
+                log(len(viirs_arrays[1]))
+            elif (below_viirs != closest_viirs):
+                log("Resolving scan edge by getting next below VIIRS data")
+                below_data = getVIIRSData(folder, below_viirs, active_dir)
+                below_arrays = getVIIRSArrays(below_data)
+                viirs_arrays[0] = np.append(viirs_arrays[0], below_arrays[0], axis=0)
+                viirs_arrays[1] = np.append(viirs_arrays[1], below_arrays[1])
+                log(len(viirs_arrays[0]))
+                log(len(viirs_arrays[1]))
             prev_swath = closest_viirs
             
             # Interpolates VIIRS data to 100x80 grid. This is the slowest part.
@@ -222,17 +247,17 @@ def process(folder, bounds):
             log("Number of points: " + str(num_points))
             if (num_points < 30):
                 log("Discarding datapoint")
-                with open(folder + "bad_points/{:04d}_{:04d}".format(x, y), "w") as datafile:
+                with open(folder + "full_bad_points/{:04d}_{:04d}".format(x, y), "w") as datafile:
                     datafile.write("bad")
                 
                 continue
                 
             log("Saving data")
             # Saving the VIIRS data to a pickle file
-            with open(folder + "processed/{:04d}_{:04d}".format(x, y), "wb") as datafile:
+            with open(folder + "full_processed/{:04d}_{:04d}".format(x, y), "wb") as datafile:
                 pickle.dump({"gridded_viirs":gridded_viirs, "roi": roi,
                              "merra_val":merra_val, "closest_viirs":closest_viirs,
-                             "curr_process":mp.current_process().name}, datafile)
+                             "curr_process":mp.current_process().name, "time":time}, datafile)
             num_saved = num_saved + 1
     log("Done processing region: {}".format(bounds))
     log("Saved {} points".format(num_saved))
@@ -252,9 +277,9 @@ def applyProcess(bounds):
 log("Number of CPUs: {}".format(mp.cpu_count()))
 
 # MERRA SHAPE: 361 lat by 576 lon
-nprocesses = 32
+nprocesses = 40
 folder = sys.argv[1]
-process_bounds = divideProcess(20, 70, 556, 300, (nprocesses, 1))
+process_bounds = divideProcess(20, 100, 556, 260, (nprocesses, 1))
 log("Divided process to following bounds:\n{}".format(process_bounds))
 log("Number of bounds: {}".format(len(process_bounds)))
 
@@ -266,9 +291,9 @@ else:
     metadata = getVIIRSMetadata(folder)
 log("Done prepping metadata\n\n")
 
-if not os.path.exists(folder + "processed"):
-    os.makedirs(folder + "processed")
-if not os.path.exists(folder + "bad_points"):
-    os.makedirs(folder + "bad_points")
+if not os.path.exists(folder + "full_processed"):
+    os.makedirs(folder + "full_processed")
+if not os.path.exists(folder + "full_bad_points"):
+    os.makedirs(folder + "full_bad_points")
 with mp.Pool(processes=nprocesses) as pool:
     pool.map(applyProcess, process_bounds)
