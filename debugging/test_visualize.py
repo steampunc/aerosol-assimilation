@@ -4,14 +4,13 @@ import numpy as np
 import cartopy.io.shapereader as shprdr
 import xarray as xr
 
-data = xr.open_dataset("data/filtered_aod_data.nc")
+data = xr.open_dataset("../data/filtered_aod_data.nc")
 
 print(data.geospatial_bounds[9:-2].split(","))
-fig, axes = plt.subplots(ncols=4, nrows=2, subplot_kw={'projection': ccrs.PlateCarree()})
-for i in range(4):
-    for j in range(2):
-        axes[j][i].contourf(data.lon, data.lat, data.AODANA.values[i + 4 * j], transform=ccrs.PlateCarree(), cmap="viridis")
+fig, axes = plt.subplots(ncols=1, nrows=1, subplot_kw={'projection': ccrs.PlateCarree()})
 
-        axes[j][i].coastlines()
+axes.scatter(data.Longitude, data.Latitude, c=np.isnan(data.AOD550.values), transform=ccrs.PlateCarree(), cmap="viridis")
+
+axes.coastlines()
 
 plt.show()
